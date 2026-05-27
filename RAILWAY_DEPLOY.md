@@ -107,6 +107,8 @@ In the **web service** → **Variables**, add (see `.env.railway.example`):
 | `MAILER_FROM_ADDRESS` | e.g. `noreply@yourdomain.com` |
 | `MAILER_FROM_NAME` | `Cloudrobe` |
 
+Set **`MAILER_DSN`** so verification emails actually send from `/api/v1/register`. The API still returns success if the mailer throws (user is created; check logs), but users will not get the link until SMTP is fixed.
+
 Optional (if you use Google OAuth): `OAUTH_GOOGLE_CLIENT_ID`, `OAUTH_GOOGLE_CLIENT_SECRET`.
 
 Railway sets **`PORT`** automatically — do not override it.
@@ -145,7 +147,7 @@ Test logins after seeding:
 
 ## Step 7 — Point the mobile app at Railway
 
-In **AppDev**, set the API base URL to your Railway domain, e.g.:
+In **AppdevFrontend**, set the API base URL to your Railway domain, e.g.:
 
 `https://YOUR-DOMAIN.up.railway.app/api`
 

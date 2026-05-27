@@ -15,6 +15,6 @@ phpunit.xml.dist
 docker-compose.yaml
 compose-disable.yaml
 handson_c
-AppDev
+AppdevFrontend
 *.md
 !RAILWAY_DEPLOY.md

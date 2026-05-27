@@ -5,7 +5,11 @@ namespace App\Controller\Api\V1;
 use App\Entity\User;
 use App\Service\EmailVerificationService;
 use Doctrine\ORM\EntityManagerInterface;
+use Lexik\Bundle\JWTAuthenticationBundle\Services\JWTTokenManagerInterface;
+use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpClient\Exception\TransportException;
+use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
@@ -40,12 +44,118 @@ final class AuthController extends AbstractController
         ]);
     }
 
+    #[Route('/login/google', name: 'api_v1_login_google', methods: ['POST'])]
+    public function loginWithGoogle(
+        Request $request,
+        EntityManagerInterface $em,
+        JWTTokenManagerInterface $jwtTokenManager,
+        LoggerInterface $logger,
+    ): JsonResponse {
+        $payload = json_decode((string) $request->getContent(), true);
+        $idToken = is_array($payload) ? trim((string) ($payload['idToken'] ?? '')) : '';
+
+        if ($idToken === '') {
+            return $this->json([
+                'success' => false,
+                'data' => null,
+                'error' => ['code' => 'validation_error', 'message' => 'idToken is required.'],
+            ], 422);
+        }
+
+        try {
+            $response = HttpClient::create()->request('GET', 'https://oauth2.googleapis.com/tokeninfo', [
+                'query' => ['id_token' => $idToken],
+                'timeout' => 12,
+            ]);
+            $googleData = $response->toArray(false);
+            $statusCode = $response->getStatusCode();
+        } catch (TransportException $e) {
+            $logger->error('Google token verification transport error', ['exception' => $e]);
+            return $this->json([
+                'success' => false,
+                'data' => null,
+                'error' => ['code' => 'google_unreachable', 'message' => 'Could not verify Google token. Try again.'],
+            ], 503);
+        } catch (\Throwable $e) {
+            $logger->warning('Google token verification failed', ['exception' => $e]);
+            return $this->json([
+                'success' => false,
+                'data' => null,
+                'error' => ['code' => 'google_token_invalid', 'message' => 'Invalid Google token.'],
+            ], 401);
+        }
+
+        if ($statusCode !== 200) {
+            return $this->json([
+                'success' => false,
+                'data' => null,
+                'error' => ['code' => 'google_token_invalid', 'message' => 'Invalid Google token.'],
+            ], 401);
+        }
+
+        $email = trim((string) ($googleData['email'] ?? ''));
+        $googleId = trim((string) ($googleData['sub'] ?? ''));
+        $emailVerified = (string) ($googleData['email_verified'] ?? '') === 'true';
+        $fullName = trim((string) ($googleData['name'] ?? ''));
+
+        if ($email === '' || $googleId === '' || !$emailVerified) {
+            return $this->json([
+                'success' => false,
+                'data' => null,
+                'error' => ['code' => 'google_claims_invalid', 'message' => 'Google account must provide a verified email.'],
+            ], 401);
+        }
+
+        /** @var User|null $user */
+        $user = $em->getRepository(User::class)->findOneBy(['email' => $email]);
+        if (!$user instanceof User) {
+            $baseUsername = strtolower(strstr($email, '@', true) ?: $googleId);
+            $username = $baseUsername;
+            $suffix = 1;
+            while ($em->getRepository(User::class)->findOneBy(['username' => $username])) {
+                $username = sprintf('%s_%d', $baseUsername, $suffix++);
+            }
+
+            $user = new User();
+            $user->setEmail($email);
+            $user->setUsername($username);
+            $user->setFullName($fullName !== '' ? $fullName : $email);
+            $user->setRoles(['ROLE_USER']);
+            // random password placeholder for Google-only accounts
+            $user->setPassword(password_hash(bin2hex(random_bytes(16)), PASSWORD_BCRYPT));
+            $user->setIsVerified(true);
+        }
+
+        $user->setGoogleId($googleId);
+        if ($fullName !== '') {
+            $user->setFullName($fullName);
+        }
+        $user->setIsVerified(true);
+
+        $em->persist($user);
+        $em->flush();
+
+        return $this->json([
+            'success' => true,
+            'token' => $jwtTokenManager->create($user),
+            'user' => [
+                'id' => $user->getId(),
+                'username' => $user->getUsername(),
+                'email' => $user->getEmail(),
+                'fullName' => $user->getFullName(),
+                'roles' => $user->getRoles(),
+                'verified' => $user->isVerified(),
+            ],
+        ]);
+    }
+
     #[Route('/register', name: 'api_v1_register', methods: ['POST'])]
     public function register(
         Request $request,
         EntityManagerInterface $em,
         UserPasswordHasherInterface $hasher,
         EmailVerificationService $emailVerification,
+        LoggerInterface $logger,
     ): JsonResponse {
         $payload = json_decode((string) $request->getContent(), true);
         if (!is_array($payload)) {
@@ -97,7 +207,18 @@ final class AuthController extends AbstractController
         $emailVerification->issueToken($user);
         $em->persist($user);
         $em->flush();
-        $emailVerification->sendVerificationEmail($user);
+
+        $emailSent = true;
+        try {
+            $emailVerification->sendVerificationEmail($user);
+        } catch (\Throwable $e) {
+            $emailSent = false;
+            $logger->error('API registration: verification email failed', [
+                'exception' => $e,
+                'userId' => $user->getId(),
+                'email' => $user->getEmail(),
+            ]);
+        }
 
         return $this->json([
             'success' => true,
@@ -105,7 +226,10 @@ final class AuthController extends AbstractController
                 'email' => $user->getEmail(),
                 'username' => $user->getUsername(),
                 'verified' => $user->isVerified(),
-                'message' => 'Account created. Please verify your email.',
+                'emailSent' => $emailSent,
+                'message' => $emailSent
+                    ? 'Account created. Please verify your email.'
+                    : 'Account created. We could not send the verification email (mailer may be misconfigured). You can still sign in if an admin verifies your account.',
             ],
             'error' => null,
         ], 201);
