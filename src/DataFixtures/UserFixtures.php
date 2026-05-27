@@ -42,7 +42,7 @@ class UserFixtures extends Fixture
         
         $hashedPassword = $this->passwordHasher->hashPassword(
             $staff,
-            'staff123'  // Default password - should be changed after first login
+            'staff123'  // Default password lol
         );
         $staff->setPassword($hashedPassword);
         
