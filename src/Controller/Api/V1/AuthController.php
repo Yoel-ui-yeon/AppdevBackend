@@ -49,6 +49,7 @@ final class AuthController extends AbstractController
         Request $request,
         EntityManagerInterface $em,
         JWTTokenManagerInterface $jwtTokenManager,
+        UserPasswordHasherInterface $hasher,
         LoggerInterface $logger,
     ): JsonResponse {
         $payload = json_decode((string) $request->getContent(), true);
@@ -121,8 +122,8 @@ final class AuthController extends AbstractController
             $user->setUsername($username);
             $user->setFullName($fullName !== '' ? $fullName : $email);
             $user->setRoles(['ROLE_USER']);
-            // random password placeholder for Google-only accounts
-            $user->setPassword(password_hash(bin2hex(random_bytes(16)), PASSWORD_BCRYPT));
+            // Random placeholder password for Google-only accounts (Symfony-compatible hash).
+            $user->setPassword($hasher->hashPassword($user, bin2hex(random_bytes(16))));
             $user->setIsVerified(true);
         }
 
